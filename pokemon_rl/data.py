@@ -85,10 +85,12 @@ SPECIES: dict[str, Species] = {
     ),
 }
 
-# Both trainers use this fixed roster; a team slot always maps to the same
-# species, so the lead (and every later switch) is the only team decision.
+# Both trainers draft from this fixed roster; a roster slot always maps to the
+# same species, so the species of a slot never has to be part of the
+# observation -- the slot index *is* the species.
 TEAM: tuple[str, ...] = ("rhydon", "starmie", "zapdos")
 
 LEVEL = 100
 MOVES_PER_POKEMON = 2
-TEAM_SIZE = len(TEAM)
+TEAM_SIZE = len(TEAM)  # roster slots, i.e. the size of the draft pool
+PICK_SIZE = 2  # how many of the roster actually battle; picking 2 of 3 == banning 1

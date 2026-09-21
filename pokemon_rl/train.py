@@ -94,6 +94,7 @@ def train(args: argparse.Namespace) -> DQNAgent:
         epsilon_start=args.epsilon_start,
         epsilon_end=args.epsilon_end,
         epsilon_decay_steps=args.epsilon_decay,
+        draft_epsilon=args.draft_epsilon,
         seed=args.seed,
     )
 
@@ -215,6 +216,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--epsilon-start", type=float, default=1.0)
     parser.add_argument("--epsilon-end", type=float, default=0.05)
     parser.add_argument("--epsilon-decay", type=int, default=30_000)
+    parser.add_argument("--draft-epsilon", type=float, default=0.25,
+                        help="exploration floor on the draft decision, which is taken "
+                             "once per episode from an always-identical state")
     parser.add_argument("--updates-per-transition", type=int, default=1)
     parser.add_argument("--pool-size", type=int, default=20,
                         help="how many past snapshots to keep as opponents")

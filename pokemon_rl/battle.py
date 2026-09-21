@@ -3,7 +3,8 @@
 Simplifications (as specified):
   * every move hits (100% accuracy), no critical hits, no status moves,
     no secondary effects and no PP limits;
-  * teams are the same fixed three Pokemon, only the order of play is chosen;
+  * both trainers draft two of the same three Pokemon, so the team choice and
+    the order of play are the only decisions;
   * damage keeps the Gen-1 random roll, so battles stay stochastic.
 """
 
@@ -11,16 +12,30 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
+from typing import Sequence
 
 import numpy as np
 
-from .data import LEVEL, PHYSICAL, SPECIES, TEAM, TEAM_SIZE, Move, Species, type_effectiveness
+from .data import (
+    LEVEL, PHYSICAL, PICK_SIZE, SPECIES, TEAM, TEAM_SIZE, Move, Species,
+    type_effectiveness,
+)
 
-# Action space: two moves of the active Pokemon, then one switch per team slot.
+# Action space: two moves of the active Pokemon, then one slot-addressed action
+# per roster slot -- a switch during the battle, a ban during the draft.
 MOVE_ACTIONS = 2
 N_ACTIONS = MOVE_ACTIONS + TEAM_SIZE  # 5
-OBS_SIZE = 2 * (3 * TEAM_SIZE) + 1  # per side: hp / alive / active, plus a phase flag
 
+# Per Pokemon: picked / hp fraction / alive / active.  `picked` and `alive` are
+# both needed: without `picked` a Pokemon that was never drafted looks exactly
+# like one that has fainted (hp 0, not alive), which hides how many knock-outs
+# still stand between a side and victory.
+FEATURES_PER_POKEMON = 4
+PHASE_FLAGS = 3  # draft / choosing a lead or a replacement / choosing a move
+OBS_SIZE = 2 * (FEATURES_PER_POKEMON * TEAM_SIZE) + PHASE_FLAGS  # 27
+OBS_DRAFT_FLAG = 2 * (FEATURES_PER_POKEMON * TEAM_SIZE)  # index of the draft flag
+
+PHASE_DRAFT = "draft"
 PHASE_LEAD = "lead"
 PHASE_MOVE = "move"
 PHASE_REPLACE = "replace"
@@ -76,17 +91,24 @@ def compute_damage(
 class Battle:
     """Two-sided battle driven by simultaneous action selection."""
 
-    def __init__(self, rng: random.Random | None = None, max_turns: int = 200) -> None:
+    def __init__(self, rng: random.Random | None = None, max_turns: int = 200,
+                 bans: Sequence[int] | None = None) -> None:
         self.rng = rng or random.Random()
         self.max_turns = max_turns
         self.team: list[list[PokemonState]] = [
             [PokemonState(SPECIES[name]) for name in TEAM] for _ in SIDES
         ]
+        # Every roster slot starts as a candidate; the draft removes one per side.
+        self.picked: list[list[bool]] = [[True] * TEAM_SIZE for _ in SIDES]
         self.active: list[int | None] = [None, None]
-        self.phase = PHASE_LEAD
+        self.phase = PHASE_DRAFT
         self.turn = 0
         self.winner: int | None = None
         self.log: list[str] = []
+        if bans is not None:
+            # Pre-drafted battle: used by the matchup analysis (and the tests)
+            # to pin both teams instead of letting the policies choose.
+            self._apply_bans(bans)
 
     # ------------------------------------------------------------------ state
 
@@ -112,8 +134,14 @@ class Battle:
     def alive_slots(self, side: int) -> list[int]:
         return [i for i, mon in enumerate(self.team[side]) if not mon.fainted]
 
+    def picked_slots(self, side: int) -> list[int]:
+        return [i for i, picked in enumerate(self.picked[side]) if picked]
+
+    def team_names(self, side: int) -> tuple[str, ...]:
+        return tuple(self.team[side][slot].species.name for slot in self.picked_slots(side))
+
     def needs_action(self, side: int) -> bool:
-        if self.phase in (PHASE_LEAD, PHASE_MOVE):
+        if self.phase in (PHASE_DRAFT, PHASE_LEAD, PHASE_MOVE):
             return True
         if self.phase == PHASE_REPLACE:
             mon = self.active_pokemon(side)
@@ -121,6 +149,10 @@ class Battle:
         return False
 
     def legal_actions(self, side: int) -> list[int]:
+        if self.phase == PHASE_DRAFT:
+            # Picking 2 of 3 is the same decision as banning 1 of 3, so the
+            # draft is a single choice that reuses the slot-addressed actions.
+            return [MOVE_ACTIONS + slot for slot in range(TEAM_SIZE)]
         if self.phase in (PHASE_LEAD, PHASE_REPLACE):
             return [MOVE_ACTIONS + slot for slot in self.alive_slots(side)
                     if slot != self.active[side]]
@@ -136,21 +168,35 @@ class Battle:
         return mask
 
     def observation(self, side: int) -> np.ndarray:
-        """Battle state from `side`'s point of view (own team first)."""
+        """Battle state from `side`'s point of view (own team first).
+
+        The slot index carries the species, so only the state of each slot has
+        to be encoded.  `picked` and `alive` separate the three cases a single
+        HP fraction would collapse into one: never drafted, still fighting,
+        and knocked out.
+        """
         features: list[float] = []
         for owner in (side, 1 - side):
             for slot, mon in enumerate(self.team[owner]):
-                features.append(mon.hp_fraction)
-                features.append(0.0 if mon.fainted else 1.0)
+                picked = self.picked[owner][slot]
+                features.append(1.0 if picked else 0.0)
+                features.append(mon.hp_fraction if picked else 0.0)
+                features.append(1.0 if picked and not mon.fainted else 0.0)
                 features.append(1.0 if self.active[owner] == slot else 0.0)
+        features.append(1.0 if self.phase == PHASE_DRAFT else 0.0)
         features.append(1.0 if self.phase in (PHASE_LEAD, PHASE_REPLACE) else 0.0)
+        features.append(1.0 if self.phase == PHASE_MOVE else 0.0)
         return np.asarray(features, dtype=np.float64)
 
     def hp_diff(self, side: int) -> float:
-        """Own remaining HP minus the opponent's, in team fractions (-1..1)."""
+        """Own remaining HP minus the opponent's, in team fractions (-1..1).
+
+        Banned Pokemon sit at 0 HP and drop out of the sum on their own, so the
+        normaliser is the drafted team size rather than the roster size.
+        """
         mine = sum(mon.hp_fraction for mon in self.team[side])
         theirs = sum(mon.hp_fraction for mon in self.team[1 - side])
-        return (mine - theirs) / TEAM_SIZE
+        return (mine - theirs) / PICK_SIZE
 
     # ------------------------------------------------------------- transition
 
@@ -164,7 +210,9 @@ class Battle:
                 if actions[side] not in self.legal_actions(side):
                     raise ValueError(f"illegal action {actions[side]} for side {side}")
 
-        if self.phase == PHASE_LEAD:
+        if self.phase == PHASE_DRAFT:
+            self._apply_bans([actions[side] - MOVE_ACTIONS for side in SIDES])
+        elif self.phase == PHASE_LEAD:
             self._switch_phase(actions, "leads with")
             self.phase = PHASE_MOVE
         elif self.phase == PHASE_REPLACE:
@@ -173,6 +221,23 @@ class Battle:
         else:
             self._resolve_turn(actions)
             self._check_end()
+
+    def _apply_bans(self, slots: Sequence[int]) -> None:
+        """Drop one Pokemon per side, then move on to the lead phase.
+
+        A banned Pokemon is left at 0 HP, so `alive_slots`, `legal_actions` and
+        the end-of-battle check keep working untouched; only the observation
+        has to tell "banned" apart from "fainted".
+        """
+        for side in SIDES:
+            slot = slots[side]
+            if not 0 <= slot < TEAM_SIZE:
+                raise ValueError(f"side {side} banned an unknown slot {slot}")
+            self.picked[side][slot] = False
+            self.team[side][slot].hp = 0
+            self._log(f"P{side + 1} leaves out {self.team[side][slot].species.name} "
+                      f"(team: {', '.join(self.team_names(side))})")
+        self.phase = PHASE_LEAD
 
     def _switch_phase(self, actions: dict[int, int], verb: str) -> None:
         for side in SIDES:
