@@ -1,14 +1,15 @@
 import random
+from typing import Any
 
 import numpy as np
 import pytest
 
-from pokemon_rl.agents import BattleView, DQNAgent, GreedyAgent, RandomAgent, ReplayBuffer, Transition
+from pokemon_rl.agents import DQNAgent, GreedyAgent, RandomAgent, ReplayBuffer, Transition
 from pokemon_rl.battle import MOVE_ACTIONS, N_ACTIONS, OBS_SIZE, Battle
 
 
-def make_agent(**kwargs):
-    defaults = dict(hidden_layer_sizes=(16,), batch_size=4, warmup=4, seed=0)
+def make_agent(**kwargs) -> DQNAgent:
+    defaults: dict[str, Any] = dict(hidden_layer_sizes=(16,), batch_size=4, warmup=4, seed=0)
     defaults.update(kwargs)
     return DQNAgent(**defaults)
 
@@ -118,6 +119,12 @@ def test_replay_buffer_evicts_oldest():
     assert [t.action for t in buffer.buffer] == [1, 2]
 
 
+def greedy_for(battle: Battle, side: int) -> GreedyAgent:
+    agent = GreedyAgent(seed=0)
+    agent.attach(battle, side)
+    return agent
+
+
 def test_random_agent_stays_legal():
     agent = RandomAgent(seed=0)
     mask = np.array([False, False, True, False, True])
@@ -127,14 +134,14 @@ def test_random_agent_stays_legal():
 def test_greedy_agent_picks_the_strongest_move():
     battle = Battle(rng=random.Random(0))
     battle.step({0: MOVE_ACTIONS + 1, 1: MOVE_ACTIONS + 0})  # Starmie vs Rhydon
-    agent = GreedyAgent(battle_ref=BattleView(battle, side=0), seed=0)
+    agent = greedy_for(battle, side=0)
     assert agent.act(battle.observation(0), battle.legal_mask(0)) == 0  # Surf, 4x
 
 
 def test_greedy_agent_avoids_a_move_the_target_is_immune_to():
     battle = Battle(rng=random.Random(0))
     battle.step({0: MOVE_ACTIONS + 0, 1: MOVE_ACTIONS + 2})  # Rhydon vs Zapdos
-    agent = GreedyAgent(battle_ref=BattleView(battle, side=0), seed=0)
+    agent = greedy_for(battle, side=0)
     assert agent.act(battle.observation(0), battle.legal_mask(0)) == 1  # Rock Slide, not Earthquake
 
 
@@ -142,7 +149,7 @@ def test_greedy_agent_replaces_a_faint_with_the_best_matchup():
     battle = Battle(rng=random.Random(1))
     battle.step({0: MOVE_ACTIONS + 1, 1: MOVE_ACTIONS + 0})  # Starmie vs Rhydon
     battle.step({0: 0, 1: 0})  # Surf knocks Rhydon out
-    agent = GreedyAgent(battle_ref=BattleView(battle, side=1), seed=0)
+    agent = greedy_for(battle, side=1)
     # Against Starmie, Zapdos (Thunderbolt, 2x) beats sending in the other Starmie.
     assert agent.act(battle.observation(1), battle.legal_mask(1)) == MOVE_ACTIONS + 2
 

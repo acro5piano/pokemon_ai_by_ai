@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .agents import DQNAgent, FrozenPolicy, GreedyAgent, RandomAgent
-from .selfplay import play_episode
+from .selfplay import Policy, play_episode
 
 LOGGER = logging.getLogger("pokemon_rl")
 
@@ -34,11 +34,11 @@ class EvalResult:
         return f"{self.win_rate:.1%} ({self.wins}W/{self.losses}L/{self.draws}D)"
 
 
-def make_opponent(kind: str, seed: int):
+def make_opponent(kind: str, seed: int) -> Policy:
     if kind == "random":
         return RandomAgent(seed=seed)
     if kind == "greedy":
-        return GreedyAgent(battle_ref=None, seed=seed)
+        return GreedyAgent(seed=seed)
     raise ValueError(f"unknown opponent: {kind}")
 
 
@@ -50,8 +50,7 @@ def evaluate(agent: DQNAgent, opponent_kind: str, battles: int, seed: int,
     for i in range(battles):
         opponent = make_opponent(opponent_kind, seed=seed + i)
         agent_side = i % 2
-        policies = [None, None]
-        policies[agent_side] = agent
+        policies: list[Policy] = [agent, agent]
         policies[1 - agent_side] = opponent
         episode = play_episode(policies, rng, greedy=True, max_turns=max_turns)
         if episode.winner is None:
@@ -113,6 +112,8 @@ def train(args: argparse.Namespace) -> DQNAgent:
 
     for episode in range(1, args.episodes + 1):
         losses: list[float] = []
+        policies: list[Policy]
+        learner_sides: tuple[int, ...]
 
         def on_transition() -> None:
             for _ in range(args.updates_per_transition):
@@ -125,8 +126,7 @@ def train(args: argparse.Namespace) -> DQNAgent:
             # rather than the live policy, with the learner alternating sides.
             opponent = rng.choice(pool)
             learner_side = rng.randrange(2)
-            policies = [None, None]
-            policies[learner_side] = agent
+            policies = [agent, agent]
             policies[1 - learner_side] = opponent
             learner_sides = (learner_side,)
         else:

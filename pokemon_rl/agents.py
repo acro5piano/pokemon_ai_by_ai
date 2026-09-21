@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 from sklearn.neural_network import MLPRegressor
 
-from .battle import Battle, MOVE_ACTIONS, N_ACTIONS, OBS_SIZE, compute_damage
+from .battle import Battle, MOVE_ACTIONS, N_ACTIONS, OBS_SIZE, PokemonState, compute_damage
 
 
 @dataclass
@@ -98,7 +98,7 @@ class DQNAgent:
         return self.epsilon_start + progress * (self.epsilon_end - self.epsilon_start)
 
     def q_values(self, state: np.ndarray) -> np.ndarray:
-        return self.model.predict(state.reshape(1, -1))[0]
+        return np.asarray(self.model.predict(state.reshape(1, -1)))[0]
 
     def act(self, state: np.ndarray, mask: np.ndarray, greedy: bool = False) -> int:
         legal = np.flatnonzero(mask)
@@ -121,7 +121,7 @@ class DQNAgent:
         next_states = np.stack([t.next_state for t in batch])
         next_masks = np.stack([t.next_mask for t in batch])
 
-        next_q = self.target_model.predict(next_states)
+        next_q = np.asarray(self.target_model.predict(next_states))
         next_q = np.where(next_masks, next_q, -np.inf)
         best_next = np.where(next_masks.any(axis=1), next_q.max(axis=1), 0.0)
 
@@ -129,7 +129,7 @@ class DQNAgent:
         dones = np.array([t.done for t in batch], dtype=bool)
         targets_for_action = rewards + np.where(dones, 0.0, self.gamma * best_next)
 
-        targets = self.model.predict(states)
+        targets = np.asarray(self.model.predict(states))
         actions = np.array([t.action for t in batch])
         rows = np.arange(len(batch))
         loss = float(np.mean((targets[rows, actions] - targets_for_action) ** 2))
@@ -178,7 +178,8 @@ class FrozenPolicy:
     def act(self, state: np.ndarray, mask: np.ndarray, greedy: bool = False) -> int:
         if not greedy and self.rng.random() < self.epsilon:
             return int(self.rng.choice(np.flatnonzero(mask).tolist()))
-        return _masked_argmax(self.model.predict(state.reshape(1, -1))[0], mask)
+        q_values = np.asarray(self.model.predict(state.reshape(1, -1)))[0]
+        return _masked_argmax(q_values, mask)
 
 
 class RandomAgent:
@@ -195,16 +196,26 @@ class RandomAgent:
 
 class GreedyAgent:
     """Scripted opponent: always fire the hardest-hitting move, never switch
-    voluntarily; on a forced switch pick the best type matchup."""
+    voluntarily; on a forced switch pick the best type matchup.
+
+    Unlike the learned policies this one reads the battle directly rather than
+    the observation vector, so it has to be attached to the battle it plays.
+    """
 
     name = "greedy"
 
-    def __init__(self, battle_ref: "BattleView", seed: int | None = None) -> None:
-        self.view = battle_ref
+    def __init__(self, seed: int | None = None) -> None:
+        self.battle: Battle | None = None
+        self.side = 0
         self.rng = random.Random(seed)
 
+    def attach(self, battle: Battle, side: int) -> None:
+        self.battle, self.side = battle, side
+
     def act(self, state: np.ndarray, mask: np.ndarray, greedy: bool = True) -> int:
-        battle, side = self.view.battle, self.view.side
+        if self.battle is None:
+            raise RuntimeError("attach the agent to a battle before asking it to act")
+        battle, side = self.battle, self.side
         legal = np.flatnonzero(mask).tolist()
         attacker = battle.active_pokemon(side)
         defender = battle.active_pokemon(1 - side)
@@ -217,7 +228,8 @@ class GreedyAgent:
         switches = [a for a in legal if a >= MOVE_ACTIONS]
         return self._best_switch(battle, side, defender, switches)
 
-    def _best_switch(self, battle: Battle, side: int, defender, switches: list[int]) -> int:
+    def _best_switch(self, battle: Battle, side: int, defender: PokemonState | None,
+                     switches: list[int]) -> int:
         if defender is None:
             return int(self.rng.choice(switches))
 
@@ -231,10 +243,3 @@ class GreedyAgent:
             return offense - incoming
 
         return max(switches, key=score)
-
-
-@dataclass
-class BattleView:
-    """Mutable handle letting a scripted agent read the live battle."""
-    battle: Battle | None = None
-    side: int = 0

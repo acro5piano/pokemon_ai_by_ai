@@ -70,12 +70,15 @@ def test_on_transition_fires_once_per_stored_transition():
     assert len(calls) == len(agent.buffer.buffer)
 
 
-def test_greedy_agent_gets_a_fresh_view_each_episode():
-    opponent = GreedyAgent(battle_ref=None, seed=0)
+def test_greedy_agent_is_reattached_to_each_new_battle():
+    opponent = GreedyAgent(seed=0)
+    battles = []
     for seed in range(3):
         result = play_episode([RandomAgent(seed=seed), opponent], random.Random(seed))
         assert result.winner in (0, 1, None)
-        assert opponent.view.side == 1
+        assert opponent.side == 1
+        battles.append(id(opponent.battle))
+    assert len(set(battles)) == 3
 
 
 def test_evaluate_reports_a_complete_tally():

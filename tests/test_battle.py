@@ -60,8 +60,8 @@ def test_lead_phase_only_allows_switches():
     assert battle.legal_actions(0) == [2, 3, 4]
     battle.step({0: 2, 1: 3})
     assert battle.phase == PHASE_MOVE
-    assert battle.active_pokemon(0).species.name == "Rhydon"
-    assert battle.active_pokemon(1).species.name == "Starmie"
+    assert battle.require_active(0).species.name == "Rhydon"
+    assert battle.require_active(1).species.name == "Starmie"
 
 
 def test_move_phase_excludes_switch_to_active_pokemon():

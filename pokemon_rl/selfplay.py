@@ -8,7 +8,7 @@ from typing import Callable, Protocol, Sequence
 
 import numpy as np
 
-from .agents import BattleView, DQNAgent, GreedyAgent, Transition
+from .agents import DQNAgent, GreedyAgent, Transition
 from .battle import N_ACTIONS, SIDES, Battle
 
 
@@ -44,13 +44,17 @@ def play_episode(
     battle = Battle(rng=rng, max_turns=max_turns)
     for side, policy in enumerate(policies):
         if isinstance(policy, GreedyAgent):
-            policy.view = BattleView(battle=battle, side=side)
+            policy.attach(battle, side)
 
     pending: dict[int, tuple[np.ndarray, int, float] | None] = {0: None, 1: None}
     decisions = 0
 
-    def push(side: int, next_state, next_mask, done: bool, terminal_reward: float = 0.0) -> None:
-        state, action, hp_diff_before = pending[side]
+    def push(side: int, next_state: np.ndarray, next_mask: np.ndarray, done: bool,
+             terminal_reward: float = 0.0) -> None:
+        entry = pending[side]
+        if learner is None or entry is None:
+            return
+        state, action, hp_diff_before = entry
         reward = shaping * (battle.hp_diff(side) - hp_diff_before) + terminal_reward
         learner.remember(Transition(state, action, reward, next_state, next_mask, done))
         pending[side] = None

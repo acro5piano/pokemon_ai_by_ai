@@ -102,6 +102,13 @@ class Battle:
         slot = self.active[side]
         return None if slot is None else self.team[side][slot]
 
+    def require_active(self, side: int) -> PokemonState:
+        """The active Pokemon of a side that is known to have one."""
+        mon = self.active_pokemon(side)
+        if mon is None:
+            raise RuntimeError(f"side {side} has no active Pokemon yet")
+        return mon
+
     def alive_slots(self, side: int) -> list[int]:
         return [i for i, mon in enumerate(self.team[side]) if not mon.fainted]
 
@@ -186,22 +193,22 @@ class Battle:
 
         attackers = [side for side in SIDES if actions[side] < MOVE_ACTIONS]
         for side in self._move_order(attackers):
-            if self.active_pokemon(side).fainted:
+            if self.require_active(side).fainted:
                 continue
             self._use_move(side, actions[side])
 
     def _move_order(self, attackers: list[int]) -> list[int]:
         if len(attackers) < 2:
             return attackers
-        speeds = [self.active_pokemon(side).species.speed for side in attackers]
+        speeds = [self.require_active(side).species.speed for side in attackers]
         if speeds[0] == speeds[1]:
             first = self.rng.choice(attackers)
             return [first, 1 - first]
-        return sorted(attackers, key=lambda s: -self.active_pokemon(s).species.speed)
+        return sorted(attackers, key=lambda s: -self.require_active(s).species.speed)
 
     def _use_move(self, side: int, move_index: int) -> None:
-        attacker = self.active_pokemon(side)
-        defender = self.active_pokemon(1 - side)
+        attacker = self.require_active(side)
+        defender = self.require_active(1 - side)
         move = attacker.species.moves[move_index]
         roll = self.rng.randint(217, 255)
         damage = compute_damage(attacker, defender, move, roll)
@@ -244,7 +251,7 @@ class Battle:
             self._log(f"== battle over: turn limit ({self.max_turns}) reached, draw ==")
             return
 
-        if any(self.active_pokemon(side).fainted for side in SIDES):
+        if any(self.require_active(side).fainted for side in SIDES):
             self.phase = PHASE_REPLACE
 
     def _log(self, message: str) -> None:
