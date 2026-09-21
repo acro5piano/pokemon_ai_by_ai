@@ -4,14 +4,26 @@ from typing import Any
 import numpy as np
 import pytest
 
-from pokemon_rl.agents import DQNAgent, GreedyAgent, RandomAgent, ReplayBuffer, Transition
-from pokemon_rl.battle import MOVE_ACTIONS, N_ACTIONS, OBS_SIZE, Battle
+from pokemon_rl.agents import (
+    DQNAgent, GreedyAgent, RandomAgent, ReplayBuffer, Transition,
+)
+from pokemon_rl.battle import (
+    MOVE_ACTIONS, N_ACTIONS, OBS_DRAFT_FLAG, OBS_SIZE, Battle, PokemonState,
+)
+from pokemon_rl.data import SPECIES, TEAM_SIZE
 
 
 def make_agent(**kwargs) -> DQNAgent:
     defaults: dict[str, Any] = dict(hidden_layer_sizes=(16,), batch_size=4, warmup=4, seed=0)
     defaults.update(kwargs)
     return DQNAgent(**defaults)
+
+
+def battle_state(value: float = 1.0) -> np.ndarray:
+    """An arbitrary observation that is *not* the draft decision."""
+    state = np.full(OBS_SIZE, value)
+    state[OBS_DRAFT_FLAG] = 0.0
+    return state
 
 
 def test_q_values_have_one_output_per_action():
@@ -131,27 +143,37 @@ def test_random_agent_stays_legal():
     assert all(mask[agent.act(np.zeros(OBS_SIZE), mask)] for _ in range(20))
 
 
-def test_greedy_agent_picks_the_strongest_move():
+def test_greedy_agent_drafts_a_legal_ban():
     battle = Battle(rng=random.Random(0))
+    agent = greedy_for(battle, side=0)
+    for _ in range(20):
+        action = agent.act(battle.observation(0), battle.legal_mask(0))
+        assert action in battle.legal_actions(0)
+
+
+def test_greedy_agent_picks_the_strongest_move():
+    battle = Battle(rng=random.Random(0), bans=(0, 1))
     battle.step({0: MOVE_ACTIONS + 1, 1: MOVE_ACTIONS + 0})  # Starmie vs Rhydon
     agent = greedy_for(battle, side=0)
     assert agent.act(battle.observation(0), battle.legal_mask(0)) == 0  # Surf, 4x
 
 
 def test_greedy_agent_avoids_a_move_the_target_is_immune_to():
-    battle = Battle(rng=random.Random(0))
+    battle = Battle(rng=random.Random(0), bans=(1, 1))
     battle.step({0: MOVE_ACTIONS + 0, 1: MOVE_ACTIONS + 2})  # Rhydon vs Zapdos
     agent = greedy_for(battle, side=0)
     assert agent.act(battle.observation(0), battle.legal_mask(0)) == 1  # Rock Slide, not Earthquake
 
 
-def test_greedy_agent_replaces_a_faint_with_the_best_matchup():
-    battle = Battle(rng=random.Random(1))
-    battle.step({0: MOVE_ACTIONS + 1, 1: MOVE_ACTIONS + 0})  # Starmie vs Rhydon
-    battle.step({0: 0, 1: 0})  # Surf knocks Rhydon out
-    agent = greedy_for(battle, side=1)
-    # Against Starmie, Zapdos (Thunderbolt, 2x) beats sending in the other Starmie.
-    assert agent.act(battle.observation(1), battle.legal_mask(1)) == MOVE_ACTIONS + 2
+def test_greedy_agent_scores_a_switch_by_damage_traded():
+    """A drafted pair leaves replacements forced, so score the choice directly."""
+    battle = Battle(rng=random.Random(0), bans=(1, 1))  # Rhydon and Zapdos
+    battle.step({0: MOVE_ACTIONS + 0, 1: MOVE_ACTIONS + 0})
+    agent = greedy_for(battle, side=0)
+    defender = PokemonState(SPECIES["starmie"])
+    switches = [MOVE_ACTIONS + 0, MOVE_ACTIONS + 2]
+    # Rhydon eats a 4x Surf; Zapdos trades a 2x Thunderbolt for a neutral hit.
+    assert agent._best_switch(battle, 0, defender, switches) == MOVE_ACTIONS + 2
 
 
 def test_snapshot_is_frozen_at_the_time_it_is_taken():
@@ -171,7 +193,7 @@ def test_snapshot_is_frozen_at_the_time_it_is_taken():
 def test_snapshot_acts_greedily_within_the_mask():
     agent = make_agent()
     snapshot = agent.snapshot(epsilon=0.0, seed=0)
-    state = np.ones(OBS_SIZE)
+    state = battle_state()
     mask = np.array([False, True, True, False, False])
     q = snapshot.model.predict(state.reshape(1, -1))[0]
     assert snapshot.act(state, mask) == 1 + int(np.argmax(q[1:3]))
@@ -182,3 +204,39 @@ def test_snapshot_exploration_stays_legal():
     snapshot = agent.snapshot(epsilon=1.0, seed=0)
     mask = np.array([True, False, False, True, False])
     assert all(mask[snapshot.act(np.zeros(OBS_SIZE), mask)] for _ in range(20))
+
+
+def test_draft_decisions_keep_an_exploration_floor():
+    """The draft is one decision per episode from an always-identical state.
+
+    The decayed epsilon would explore it only a handful of times over a whole
+    run, so the agent would lock onto one team and never learn to play the
+    other two; the floor is what keeps all three covered.
+    """
+    agent = make_agent(epsilon_start=0.02, epsilon_end=0.02, draft_epsilon=0.25)
+    draft = Battle(rng=random.Random(0)).observation(0)
+    assert agent.exploration(draft) == 0.25
+    assert agent.exploration(battle_state()) == pytest.approx(0.02)
+
+
+def test_draft_floor_never_lowers_the_normal_epsilon():
+    agent = make_agent(epsilon_start=0.9, epsilon_end=0.9, draft_epsilon=0.25)
+    draft = Battle(rng=random.Random(0)).observation(0)
+    assert agent.exploration(draft) == pytest.approx(0.9)
+
+
+def test_greedy_evaluation_ignores_the_draft_floor():
+    agent = make_agent(epsilon_start=1.0, epsilon_end=1.0, draft_epsilon=1.0)
+    battle = Battle(rng=random.Random(0))
+    state, mask = battle.observation(0), battle.legal_mask(0)
+    expected = MOVE_ACTIONS + int(np.argmax(agent.q_values(state)[MOVE_ACTIONS:]))
+    assert all(agent.act(state, mask, greedy=True) == expected for _ in range(20))
+
+
+def test_snapshots_also_vary_their_draft():
+    agent = make_agent(draft_epsilon=1.0)
+    snapshot = agent.snapshot(epsilon=0.0, seed=0)
+    battle = Battle(rng=random.Random(0))
+    state, mask = battle.observation(0), battle.legal_mask(0)
+    picks = {snapshot.act(state, mask) for _ in range(60)}
+    assert len(picks) == TEAM_SIZE  # all three bans show up

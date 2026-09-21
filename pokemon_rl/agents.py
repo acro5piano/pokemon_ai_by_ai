@@ -12,7 +12,15 @@ from pathlib import Path
 import numpy as np
 from sklearn.neural_network import MLPRegressor
 
-from .battle import Battle, MOVE_ACTIONS, N_ACTIONS, OBS_SIZE, PokemonState, compute_damage
+from .battle import (
+    Battle, MOVE_ACTIONS, N_ACTIONS, OBS_DRAFT_FLAG, OBS_SIZE, PHASE_DRAFT,
+    PokemonState, compute_damage,
+)
+
+
+def _is_draft(state: np.ndarray) -> bool:
+    """Whether an observation was taken at the draft decision."""
+    return bool(state[OBS_DRAFT_FLAG])
 
 
 @dataclass
@@ -65,6 +73,7 @@ class DQNAgent:
         epsilon_start: float = 1.0,
         epsilon_end: float = 0.05,
         epsilon_decay_steps: int = 20_000,
+        draft_epsilon: float = 0.25,
         seed: int | None = None,
     ) -> None:
         self.gamma = gamma
@@ -74,6 +83,7 @@ class DQNAgent:
         self.epsilon_start = epsilon_start
         self.epsilon_end = epsilon_end
         self.epsilon_decay_steps = epsilon_decay_steps
+        self.draft_epsilon = draft_epsilon
         self.rng = random.Random(seed)
         self.buffer = ReplayBuffer(buffer_size, self.rng)
         self.train_steps = 0
@@ -100,9 +110,21 @@ class DQNAgent:
     def q_values(self, state: np.ndarray) -> np.ndarray:
         return np.asarray(self.model.predict(state.reshape(1, -1)))[0]
 
+    def exploration(self, state: np.ndarray) -> float:
+        """Exploration rate for a state; the draft keeps a floor of its own.
+
+        The draft is a single decision per episode taken from an observation
+        that is identical every game, so the decayed epsilon would only explore
+        it a handful of times.  Keeping a floor there is what stops the learner
+        from settling on one team and never learning to play the other two.
+        """
+        if _is_draft(state):
+            return max(self.epsilon, self.draft_epsilon)
+        return self.epsilon
+
     def act(self, state: np.ndarray, mask: np.ndarray, greedy: bool = False) -> int:
         legal = np.flatnonzero(mask)
-        if not greedy and self.rng.random() < self.epsilon:
+        if not greedy and self.rng.random() < self.exploration(state):
             return int(self.rng.choice(legal.tolist()))
         return _masked_argmax(self.q_values(state), mask)
 
@@ -143,7 +165,8 @@ class DQNAgent:
 
     def snapshot(self, epsilon: float = 0.05, seed: int | None = None) -> "FrozenPolicy":
         """Freeze the current weights into a standalone opponent policy."""
-        return FrozenPolicy(copy.deepcopy(self.model), epsilon=epsilon, seed=seed)
+        return FrozenPolicy(copy.deepcopy(self.model), epsilon=epsilon,
+                            draft_epsilon=self.draft_epsilon, seed=seed)
 
     # ------------------------------------------------------------ persistence
 
@@ -170,13 +193,17 @@ class FrozenPolicy:
     name = "snapshot"
 
     def __init__(self, model: MLPRegressor, epsilon: float = 0.05,
-                 seed: int | None = None) -> None:
+                 draft_epsilon: float = 0.25, seed: int | None = None) -> None:
         self.model = model
         self.epsilon = epsilon
+        self.draft_epsilon = draft_epsilon
         self.rng = random.Random(seed)
 
     def act(self, state: np.ndarray, mask: np.ndarray, greedy: bool = False) -> int:
-        if not greedy and self.rng.random() < self.epsilon:
+        # League members vary their draft too, so the learner keeps meeting all
+        # three teams rather than whichever one this snapshot happened to like.
+        epsilon = max(self.epsilon, self.draft_epsilon) if _is_draft(state) else self.epsilon
+        if not greedy and self.rng.random() < epsilon:
             return int(self.rng.choice(np.flatnonzero(mask).tolist()))
         q_values = np.asarray(self.model.predict(state.reshape(1, -1)))[0]
         return _masked_argmax(q_values, mask)
@@ -217,6 +244,14 @@ class GreedyAgent:
             raise RuntimeError("attach the agent to a battle before asking it to act")
         battle, side = self.battle, self.side
         legal = np.flatnonzero(mask).tolist()
+
+        if battle.phase == PHASE_DRAFT:
+            # No sensible one-ply heuristic exists for the draft: the three
+            # teams form a matchup triangle, so every ban is the right one
+            # against some opponent.  Drafting at random keeps this baseline
+            # unexploitable on that decision rather than weak in a fixed way.
+            return int(self.rng.choice(legal))
+
         attacker = battle.active_pokemon(side)
         defender = battle.active_pokemon(1 - side)
 

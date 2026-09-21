@@ -10,6 +10,7 @@ dependencies = [
     { name = "numpy" },
     { name = "pytest" },
     { name = "scikit-learn" },
+    { name = "scipy" },
 ]
 
 [package.dev-dependencies]
@@ -22,6 +23,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.5.3" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "scikit-learn", specifier = ">=1.9.1" },
+    { name = "scipy", specifier = ">=1.18.1" },
 ]
 
 [package.metadata.requires-dev]

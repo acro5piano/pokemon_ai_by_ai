@@ -32,6 +32,7 @@ def play_episode(
     shaping: float = 0.0,
     greedy: bool = False,
     max_turns: int = 200,
+    bans: Sequence[int] | None = None,
     on_transition: Callable[[], None] | None = None,
 ) -> EpisodeResult:
     """Run one battle. Transitions of `learner_sides` are pushed to `learner`.
@@ -39,9 +40,14 @@ def play_episode(
     A side's transition spans from the moment it picks an action to its next
     decision point, which may be several battle steps later (the opponent can
     be replacing a fainted Pokemon meanwhile).  The intermediate HP swing is
-    folded into the shaping reward, so nothing is lost by the gap.
+    folded into the shaping reward, so nothing is lost by the gap.  The draft
+    is just the first such decision: it earns no shaping reward of its own and
+    is credited purely by bootstrapping from the battle that follows.
+
+    Passing `bans` pins both teams and skips the draft entirely, which is how
+    the matchup analysis holds the team fixed while the policy plays it out.
     """
-    battle = Battle(rng=rng, max_turns=max_turns)
+    battle = Battle(rng=rng, max_turns=max_turns, bans=bans)
     for side, policy in enumerate(policies):
         if isinstance(policy, GreedyAgent):
             policy.attach(battle, side)

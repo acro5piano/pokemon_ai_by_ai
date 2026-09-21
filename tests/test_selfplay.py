@@ -3,7 +3,7 @@ import random
 import numpy as np
 
 from pokemon_rl.agents import DQNAgent, GreedyAgent, RandomAgent
-from pokemon_rl.battle import N_ACTIONS, OBS_SIZE
+from pokemon_rl.battle import MOVE_ACTIONS, N_ACTIONS, OBS_DRAFT_FLAG, OBS_SIZE
 from pokemon_rl.selfplay import play_episode
 from pokemon_rl.train import build_parser, evaluate, train
 
@@ -12,7 +12,36 @@ def test_episode_between_random_agents_finishes():
     result = play_episode([RandomAgent(seed=1), RandomAgent(seed=2)], random.Random(3))
     assert result.winner in (0, 1, None)
     assert result.turns > 0 and result.decisions >= 2
-    assert result.log[0].startswith("P1 leads with")
+    assert result.log[0].startswith("P1 leaves out")  # the draft comes first
+    assert any(line.startswith("P1 leads with") for line in result.log)
+
+
+def test_forced_bans_pin_both_teams_without_asking_the_policies():
+    """`bans` is how the matchup analysis holds a team fixed across battles."""
+    decisions = []
+
+    class Recorder(RandomAgent):
+        def act(self, state, mask, greedy=True):
+            decisions.append(state[OBS_DRAFT_FLAG])
+            return super().act(state, mask, greedy=greedy)
+
+    result = play_episode([Recorder(seed=1), Recorder(seed=2)],
+                          random.Random(3), bans=(2, 0))
+    assert not any(decisions)  # no policy was ever asked to draft
+    assert result.log[0] == "P1 leaves out Zapdos (team: Rhydon, Starmie)"
+    assert result.log[1] == "P2 leaves out Rhydon (team: Starmie, Zapdos)"
+
+
+def test_the_draft_is_the_first_stored_decision():
+    agent = DQNAgent(hidden_layer_sizes=(8,), warmup=10_000, seed=0)
+    play_episode([agent, agent], random.Random(0), learner=agent,
+                 learner_sides=(0, 1), shaping=0.5)
+    first = list(agent.buffer.buffer)[0]
+    assert first.state[OBS_DRAFT_FLAG] == 1.0
+    assert first.action >= MOVE_ACTIONS  # a ban, not a move
+    # Nothing has happened yet, so the draft earns no shaping reward of its own
+    # and is credited purely by bootstrapping from the battle that follows.
+    assert first.reward == 0.0
 
 
 def test_self_play_collects_transitions_for_both_sides():
